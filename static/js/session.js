@@ -281,6 +281,12 @@ const Session = (() => {
                 setTimeout(() => EdgeRenderer.redrawAll(), 500);
             });
 
+            // Re-apply any existing summary-node collapses (so reload shows
+            // the summary, not the underlying nodes it covers).
+            if (typeof NodeMenu !== 'undefined' && NodeMenu.applyExistingSummaryCollapses) {
+                setTimeout(() => NodeMenu.applyExistingSummaryCollapses(), 50);
+            }
+
             refreshList();
         } catch (err) {
             console.error('Failed to load session:', err);

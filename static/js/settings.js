@@ -7,6 +7,8 @@ const Settings = (() => {
     let providers = [];
     let defaultId = null;
     let fallbackId = null;
+    let activeTab = 'providers';   // 'providers' | 'mcp'
+    let mcpServers = [];
 
     function init() {
         overlay = document.getElementById('settings-overlay');
@@ -46,7 +48,7 @@ const Settings = (() => {
         const header = document.createElement('div');
         header.className = 'settings-header';
         const h2 = document.createElement('h2');
-        h2.textContent = 'LLM Providers';
+        h2.textContent = 'Settings';
         const closeBtn = document.createElement('button');
         closeBtn.className = 'btn btn-icon settings-close';
         closeBtn.textContent = '\u00D7';
@@ -55,6 +57,28 @@ const Settings = (() => {
         header.appendChild(closeBtn);
         panel.appendChild(header);
 
+        // Tab strip
+        const tabBar = document.createElement('div');
+        tabBar.className = 'settings-tabs';
+        for (const [key, label] of [['providers', 'LLM Providers'], ['mcp', 'MCP Servers']]) {
+            const btn = document.createElement('button');
+            btn.className = 'settings-tab' + (activeTab === key ? ' active' : '');
+            btn.textContent = label;
+            btn.addEventListener('click', () => {
+                activeTab = key;
+                if (key === 'mcp') loadMcpAndRender();
+                else render();
+            });
+            tabBar.appendChild(btn);
+        }
+        panel.appendChild(tabBar);
+
+        if (activeTab === 'mcp') {
+            renderMcpTab(panel);
+            return;
+        }
+
+        // ---- Providers tab body ----
         // Add provider button
         const addBtn = document.createElement('button');
         addBtn.className = 'btn btn-primary settings-add-btn';
@@ -456,6 +480,166 @@ const Settings = (() => {
         saveRow.appendChild(saveBtn);
         saveRow.appendChild(cancelBtn);
         panel.appendChild(saveRow);
+    }
+
+    // ---------- MCP Servers tab ----------
+
+    async function loadMcpAndRender() {
+        try {
+            const res = await API.listMcpServers();
+            mcpServers = res.servers || [];
+        } catch (e) {
+            console.warn('Failed to load MCP servers:', e);
+            mcpServers = [];
+        }
+        render();
+    }
+
+    function renderMcpTab(panel) {
+        // Foundation banner
+        const banner = document.createElement('div');
+        banner.className = 'mcp-foundation-note';
+        banner.innerHTML = `
+            <strong>Foundation only.</strong> Configure and verify MCP servers here.
+            Wiring MCP tools into the LLM call loop is a follow-up — once landed,
+            servers configured here will be available automatically.
+        `;
+        panel.appendChild(banner);
+
+        // Add button
+        const addBtn = document.createElement('button');
+        addBtn.className = 'btn btn-primary settings-add-btn';
+        addBtn.textContent = '+ Add MCP Server';
+        addBtn.addEventListener('click', () => showMcpForm());
+        panel.appendChild(addBtn);
+
+        // Server list
+        const list = document.createElement('div');
+        list.className = 'provider-list';
+        if (mcpServers.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'mcp-empty';
+            empty.textContent = 'No MCP servers configured yet.';
+            list.appendChild(empty);
+        } else {
+            for (const s of mcpServers) list.appendChild(createMcpCard(s));
+        }
+        panel.appendChild(list);
+    }
+
+    function createMcpCard(s) {
+        const card = document.createElement('div');
+        card.className = 'provider-card';
+        card.innerHTML = `
+            <div class="provider-card-header">
+                <div>
+                    <div class="provider-card-name">${escapeHTML(s.name)}</div>
+                    <div class="provider-card-meta">
+                        ${escapeHTML(s.transport)} · ${escapeHTML(s.url || s.command || '')}
+                    </div>
+                </div>
+                <div class="provider-card-actions">
+                    <button class="btn btn-sm btn-test-mcp">Test</button>
+                    <button class="btn btn-sm btn-delete-mcp">Delete</button>
+                </div>
+            </div>
+            <div class="mcp-test-result hidden"></div>
+        `;
+        const resultEl = card.querySelector('.mcp-test-result');
+        card.querySelector('.btn-test-mcp').addEventListener('click', async () => {
+            resultEl.classList.remove('hidden', 'success', 'error');
+            resultEl.textContent = 'Testing…';
+            try {
+                const r = await API.testMcpServer(s.id);
+                if (r.ok) {
+                    resultEl.classList.add('success');
+                    const toolsList = (r.tools || []).map(t => `<li><code>${escapeHTML(t.name)}</code> — ${escapeHTML(t.description || '')}</li>`).join('');
+                    resultEl.innerHTML = `✓ Connected. <strong>${r.tools.length}</strong> tool${r.tools.length === 1 ? '' : 's'} available.` +
+                        (toolsList ? `<ul class="mcp-tools-list">${toolsList}</ul>` : '');
+                } else {
+                    resultEl.classList.add('error');
+                    resultEl.textContent = `✗ ${r.error || 'Unknown error'}`;
+                }
+            } catch (e) {
+                resultEl.classList.add('error');
+                resultEl.textContent = `✗ ${e.message || e}`;
+            }
+        });
+        card.querySelector('.btn-delete-mcp').addEventListener('click', async () => {
+            if (!confirm(`Delete MCP server "${s.name}"?`)) return;
+            await API.deleteMcpServer(s.id);
+            await loadMcpAndRender();
+        });
+        return card;
+    }
+
+    function showMcpForm() {
+        const panel = overlay.querySelector('.settings-panel');
+        while (panel.firstChild) panel.removeChild(panel.firstChild);
+
+        const header = document.createElement('div');
+        header.className = 'settings-header';
+        const h2 = document.createElement('h2');
+        h2.textContent = 'Add MCP Server';
+        const closeBtn = document.createElement('button');
+        closeBtn.className = 'btn btn-icon settings-close';
+        closeBtn.textContent = '\u00D7';
+        closeBtn.addEventListener('click', () => loadMcpAndRender());
+        header.appendChild(h2);
+        header.appendChild(closeBtn);
+        panel.appendChild(header);
+
+        const form = document.createElement('div');
+        form.className = 'provider-form';
+        form.innerHTML = `
+            <label>Name<br><input type="text" class="form-input" id="mcp-name" placeholder="e.g. Filesystem MCP"></label>
+            <label>Transport<br>
+                <select class="form-input" id="mcp-transport">
+                    <option value="http">HTTP</option>
+                    <option value="sse">SSE</option>
+                    <option value="stdio" disabled>stdio (not yet supported)</option>
+                </select>
+            </label>
+            <label>URL<br><input type="text" class="form-input" id="mcp-url" placeholder="http://localhost:3000/mcp"></label>
+            <label>Authorization header (optional)<br>
+                <input type="text" class="form-input" id="mcp-auth" placeholder="Bearer ...">
+            </label>
+        `;
+        panel.appendChild(form);
+
+        const row = document.createElement('div');
+        row.className = 'form-row';
+        const save = document.createElement('button');
+        save.className = 'btn btn-primary';
+        save.textContent = 'Save';
+        save.addEventListener('click', async () => {
+            const name = document.getElementById('mcp-name').value.trim();
+            const transport = document.getElementById('mcp-transport').value;
+            const url = document.getElementById('mcp-url').value.trim();
+            const auth = document.getElementById('mcp-auth').value.trim();
+            if (!name) { alert('Name is required'); return; }
+            if (!url) { alert('URL is required'); return; }
+            const headers = auth ? { Authorization: auth } : {};
+            try {
+                await API.addMcpServer({ name, transport, url, headers });
+                await loadMcpAndRender();
+            } catch (e) {
+                alert(`Failed to add: ${e.message || e}`);
+            }
+        });
+        const cancel = document.createElement('button');
+        cancel.className = 'btn';
+        cancel.textContent = 'Cancel';
+        cancel.addEventListener('click', () => loadMcpAndRender());
+        row.appendChild(save);
+        row.appendChild(cancel);
+        panel.appendChild(row);
+    }
+
+    function escapeHTML(s) {
+        const div = document.createElement('div');
+        div.textContent = String(s ?? '');
+        return div.innerHTML;
     }
 
     return { init, show, hide };

@@ -1,0 +1,6 @@
+# Install with: pip install -r requirements-ingestion.txt
+# Enables PDF / web URL / YouTube ingestion as a session root node.
+# All deps are pure-Python or have small native bits; total ~15 MB.
+pypdf>=4.0.0
+trafilatura>=1.10.0
+youtube-transcript-api>=0.6.2

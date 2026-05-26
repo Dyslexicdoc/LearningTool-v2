@@ -203,5 +203,49 @@ const API = (() => {
         return _fetch('/api/embeddings/reindex', { method: 'POST' });
     }
 
-    return { submitQuery, queryStatus, retryQuery, streamQuery, listSessions, createSession, loadSession, saveSession, renameSession, deleteSession, exportSessionUrl, listTrash, restoreSession, permanentDeleteSession, generateTitle, getProviderList, getProviders, addProvider, updateProvider, deleteProvider, testProvider, setDefaultProvider, setFallbackProvider, getOllamaModels, embeddingsStatus, searchNodes, similarNodes, reindexEmbeddings };
+    // ---- Ingestion ----
+    async function ingestFile(file) {
+        const fd = new FormData();
+        fd.append('file', file);
+        const r = await fetch('/api/sessions/ingest/file', { method: 'POST', body: fd });
+        if (!r.ok) {
+            const body = await r.json().catch(() => ({}));
+            throw new Error(body.detail || `HTTP ${r.status}`);
+        }
+        return r.json();
+    }
+    function ingestUrl(url) {
+        return _fetch('/api/sessions/ingest/url', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url }),
+        });
+    }
+
+    // ---- Summarize ----
+    function summarizeSubtree(sessionId, nodeId, providerId) {
+        return _fetch(`/api/nodes/${encodeURIComponent(sessionId)}/${encodeURIComponent(nodeId)}/summarize`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ provider_id: providerId || null }),
+        });
+    }
+
+    // ---- MCP ----
+    function listMcpServers() { return _fetch('/api/mcp/servers'); }
+    function addMcpServer(cfg) {
+        return _fetch('/api/mcp/servers', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(cfg),
+        });
+    }
+    function deleteMcpServer(id) {
+        return _fetch(`/api/mcp/servers/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    }
+    function testMcpServer(id) {
+        return _fetch(`/api/mcp/servers/${encodeURIComponent(id)}/test`, { method: 'POST' });
+    }
+
+    return { submitQuery, queryStatus, retryQuery, streamQuery, listSessions, createSession, loadSession, saveSession, renameSession, deleteSession, exportSessionUrl, listTrash, restoreSession, permanentDeleteSession, generateTitle, getProviderList, getProviders, addProvider, updateProvider, deleteProvider, testProvider, setDefaultProvider, setFallbackProvider, getOllamaModels, embeddingsStatus, searchNodes, similarNodes, reindexEmbeddings, ingestFile, ingestUrl, summarizeSubtree, listMcpServers, addMcpServer, deleteMcpServer, testMcpServer };
 })();

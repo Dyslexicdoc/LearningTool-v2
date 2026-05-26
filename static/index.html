@@ -12,7 +12,10 @@
     <aside id="sidebar" class="sidebar">
         <div class="sidebar-header">
             <h1 class="sidebar-title">Learning Tool</h1>
-            <button id="btn-new-session" class="btn btn-primary btn-sm">+ New</button>
+            <div class="sidebar-new-buttons">
+                <button id="btn-new-session" class="btn btn-primary btn-sm">+ New</button>
+                <button id="btn-new-document" class="btn btn-sm btn-secondary" title="Start a session from a PDF, URL, or YouTube video">+ Document</button>
+            </div>
         </div>
         <div id="session-list" class="session-list">
             <!-- Sessions populated by JS -->
@@ -92,6 +95,8 @@
     <script src="/static/js/session.js"></script>
     <script src="/static/js/settings.js"></script>
     <script src="/static/js/search.js"></script>
+    <script src="/static/js/ingest.js"></script>
+    <script src="/static/js/node_menu.js"></script>
     <script src="/static/js/app.js"></script>
 </body>
 </html>
