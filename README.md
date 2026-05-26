@@ -1,3 +1,30 @@
+
+Deployment: 
+git clone https://github.com/Dyslexicdoc/LearningTool-v2.git
+cd LearningTool-v2
+git checkout feat/markdown-export-and-semantic-search
+python3 -m venv .venv
+source .venv/bin/activate       
+# Tier 1 — core only. Branching graph + markdown/Obsidian export.
+pip install -r requirements.txt
+
+# Tier 2 — add semantic search across sessions (optional, ~80 MB)
+pip install -r requirements-embeddings.txt
+
+# Tier 3 — add PDF / URL / YouTube ingestion (optional, ~15 MB)
+pip install -r requirements-ingestion.txt
+
+python app.py
+
+
+
+
+
+
+
+
+
+
 ## What's new in v2
 
 ### 📦 Markdown / Obsidian Export
