@@ -19,6 +19,25 @@ class SessionManager:
         self._trash_dir = sessions_dir.parent / "learning_sessions_trash"
         self._dir.mkdir(parents=True, exist_ok=True)
         self._trash_dir.mkdir(parents=True, exist_ok=True)
+        # Optional hooks — set by app on startup if embeddings are enabled.
+        # Signatures:
+        #   on_save(session_id: str, data: dict) -> None
+        #   on_delete(session_id: str) -> None         (soft-delete to trash)
+        #   on_purge(session_id: str) -> None          (hard-delete from trash)
+        self.on_save = None
+        self.on_delete = None
+        self.on_purge = None
+
+    def _fire(self, hook_name: str, *args):
+        hook = getattr(self, hook_name, None)
+        if hook is None:
+            return
+        try:
+            hook(*args)
+        except Exception:
+            # Hooks must never break core session ops
+            import logging
+            logging.getLogger(__name__).exception(f"Hook {hook_name} failed")
 
     def _session_path(self, session_id: str) -> Path:
         return self._dir / session_id / "session.json"
@@ -57,6 +76,7 @@ class SessionManager:
         path = self._session_path(session_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        self._fire("on_save", session_id, data)
 
     def rename(self, session_id: str, name: str):
         data = self.load(session_id)
@@ -83,6 +103,7 @@ class SessionManager:
                 trash_json.write_text(json.dumps(data, indent=2), encoding="utf-8")
             except (json.JSONDecodeError, OSError):
                 pass
+        self._fire("on_delete", session_id)
 
     def list_all(self) -> list[dict]:
         sessions = []
@@ -157,6 +178,7 @@ class SessionManager:
         folder = self._trash_dir / session_id
         if folder.exists():
             shutil.rmtree(folder)
+        self._fire("on_purge", session_id)
 
     def cleanup_trash(self) -> int:
         """Remove sessions older than TRASH_RETENTION_DAYS from trash.
@@ -175,7 +197,9 @@ class SessionManager:
                 data = json.loads(path.read_text(encoding="utf-8"))
                 deleted_at = data.get("deleted_at", "")
                 if self._days_until_expiry(deleted_at) <= 0:
+                    sid = data.get("id") or folder.name
                     shutil.rmtree(folder)
+                    self._fire("on_purge", sid)
                     purged += 1
             except (json.JSONDecodeError, OSError):
                 # Corrupt — remove it

@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse, Response
 
 from models import (
     QueryRequest, QueryResponse, JobStatusResponse,
@@ -27,6 +27,11 @@ from llm_bridge import ProviderRegistry
 from prompt_engineer import build_prompt, build_lineage_context
 from session_manager import SessionManager
 from settings_manager import SettingsManager
+import exporter
+import embedder
+import logging
+
+logger = logging.getLogger(__name__)
 
 # ---- Paths ----
 BASE_DIR = Path(__file__).parent.resolve()
@@ -51,6 +56,41 @@ settings_mgr = SettingsManager(SETTINGS_DIR, cli_url=_cli_args.llm_url, cli_mode
 provider_registry = ProviderRegistry(settings_mgr)
 session_mgr = SessionManager(SESSIONS_DIR)
 
+# Optional embeddings service. If fastembed+sqlite-vec aren't installed,
+# search/similar endpoints will 503 but everything else still works.
+embedding_service = None
+if embedder.is_available():
+    try:
+        from embedding_service import EmbeddingService
+        embedding_service = EmbeddingService(
+            sessions_dir=SESSIONS_DIR,
+            db_path=SESSIONS_DIR.parent / "embeddings.db",
+            backend=embedder.make_default_backend(),
+        )
+        # Wire SessionManager hooks. The on_save hook fires from a sync code
+        # path so we schedule the async indexer ourselves via a thread-safe
+        # call into the running event loop.
+        def _on_save(session_id: str, data: dict):
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.run_coroutine_threadsafe(
+                        embedding_service.on_session_save_async(session_id, data), loop
+                    )
+                else:
+                    embedding_service.on_session_save_sync(session_id, data)
+            except RuntimeError:
+                # No event loop (rare); fall back to sync
+                embedding_service.on_session_save_sync(session_id, data)
+        session_mgr.on_save = _on_save
+        session_mgr.on_purge = embedding_service.on_session_purge
+        logger.info("Embeddings enabled.")
+    except Exception:
+        logger.exception("Failed to initialize embedding service; continuing without semantic search.")
+        embedding_service = None
+else:
+    logger.info("Embeddings disabled (install fastembed + sqlite-vec to enable).")
+
 # Track running jobs: job_id -> dict
 jobs: dict[str, dict] = {}
 
@@ -73,6 +113,24 @@ async def lifespan(app: FastAPI):
     purged = session_mgr.cleanup_trash()
     if purged:
         print(f"Trash cleanup: permanently removed {purged} expired session(s)")
+    # One-shot reindex if embeddings are enabled and the DB looks empty.
+    if embedding_service is not None:
+        try:
+            indexed = embedding_service.status()["indexed_node_count"]
+            if indexed == 0:
+                # Run reindex in a background thread so startup isn't blocked
+                # by the first model download.
+                def _bg_reindex():
+                    try:
+                        stats = embedding_service.reindex_all()
+                        logger.info(f"[embeddings] initial reindex: {stats}")
+                    except Exception:
+                        logger.exception("[embeddings] initial reindex failed")
+                asyncio.get_event_loop().run_in_executor(None, _bg_reindex)
+            else:
+                logger.info(f"[embeddings] {indexed} nodes already indexed.")
+        except Exception:
+            logger.exception("[embeddings] startup check failed")
     yield
 
 
@@ -431,6 +489,106 @@ async def rename_session(session_id: str, req: SessionRename):
 async def delete_session(session_id: str):
     session_mgr.delete(session_id)
     return {"status": "deleted"}
+
+
+# ---- API: Export ----
+
+@app.get("/api/sessions/{session_id}/export")
+async def export_session(session_id: str, format: str = "obsidian"):
+    """Download a session as Markdown.
+
+    format=obsidian → zip of linked .md files (Obsidian-flavoured wikilinks)
+    format=single   → one .md document with depth-based heading nesting
+    """
+    data = session_mgr.load(session_id)
+    if not data:
+        raise HTTPException(404, "Session not found")
+
+    name_slug = exporter.slugify(data.get("name", "")) or "session"
+
+    if format == "obsidian":
+        content = exporter.export_obsidian(data)
+        filename = f"{name_slug}.zip"
+        return Response(
+            content=content,
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    if format == "single":
+        content = exporter.export_single_markdown(data)
+        filename = f"{name_slug}.md"
+        return Response(
+            content=content,
+            media_type="text/markdown; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    raise HTTPException(400, f"Unknown format: {format!r}. Use 'obsidian' or 'single'.")
+
+
+# ---- API: Semantic search ----
+
+def _require_embeddings():
+    if embedding_service is None:
+        raise HTTPException(
+            503,
+            "Semantic search is not available. Install fastembed and sqlite-vec, "
+            "then restart: pip install fastembed sqlite-vec",
+        )
+    return embedding_service
+
+
+@app.get("/api/embeddings/status")
+async def embeddings_status():
+    """Whether semantic search is available, and how many nodes are indexed."""
+    if embedding_service is None:
+        return {"available": False, "reason": "fastembed or sqlite-vec not installed"}
+    return {"available": True, **embedding_service.status()}
+
+
+@app.get("/api/search")
+async def semantic_search(q: str, k: int = 10, exclude_session_id: str | None = None):
+    """Semantic search across all indexed nodes.
+
+    Returns ordered results (closest first) with node + session metadata.
+    Each result includes a `snippet` derived from the response text.
+    """
+    svc = _require_embeddings()
+    k = max(1, min(k, 50))
+    try:
+        results = svc.search(q, k=k, exclude_session_id=exclude_session_id)
+    except Exception as e:
+        logger.exception("[embeddings] search failed")
+        raise HTTPException(500, f"Search failed: {e}")
+    # Add a short snippet for the UI
+    for r in results:
+        text = (r.get("response_text") or "").strip()
+        r["snippet"] = (text[:240] + "…") if len(text) > 240 else text
+    return {"query": q, "k": k, "results": results}
+
+
+@app.get("/api/nodes/{node_id}/similar")
+async def similar_nodes(node_id: str, k: int = 5, exclude_session_id: str | None = None):
+    """Find nodes semantically similar to a given node."""
+    svc = _require_embeddings()
+    k = max(1, min(k, 25))
+    results = svc.similar_to(node_id, k=k, exclude_session_id=exclude_session_id)
+    for r in results:
+        text = (r.get("response_text") or "").strip()
+        r["snippet"] = (text[:240] + "…") if len(text) > 240 else text
+    return {"node_id": node_id, "k": k, "results": results}
+
+
+@app.post("/api/embeddings/reindex")
+async def reindex_embeddings():
+    """Re-embed every session on disk. Idempotent thanks to content hashing —
+    only nodes whose (prompt+response+mode) changed will actually re-embed."""
+    svc = _require_embeddings()
+    try:
+        stats = svc.reindex_all()
+    except Exception as e:
+        logger.exception("[embeddings] reindex failed")
+        raise HTTPException(500, f"Reindex failed: {e}")
+    return {"status": "ok", "stats": stats}
 
 
 # ---- API: Trash endpoints ----

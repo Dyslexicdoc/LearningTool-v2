@@ -1,0 +1,6 @@
+# Install with: pip install -r requirements-embeddings.txt
+# Enables semantic search across sessions. Adds ~80 MB of dependencies; the
+# embedding model (~30 MB, all-MiniLM-L6-v2) downloads on first use into
+# ~/.cache/fastembed and is reused across runs.
+fastembed>=0.3.0
+sqlite-vec>=0.1.0

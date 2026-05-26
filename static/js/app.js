@@ -11,6 +11,7 @@ const App = (() => {
         Session.init();
         ContextMenu.init();
         Settings.init();
+        if (typeof Search !== 'undefined') Search.init();
 
         // Theme toggle
         const themeBtn = document.getElementById('btn-theme-toggle');

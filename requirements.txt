@@ -1,3 +1,11 @@
 fastapi>=0.100.0
 uvicorn>=0.20.0
 pydantic>=2.0.0
+
+# Optional: enables semantic search across sessions ("/api/search").
+# If these aren't installed, the rest of Learning Tool works unchanged
+# and search endpoints return 503 with a helpful message.
+# Together these add ~80 MB to the install footprint; the embedding model
+# (~30 MB) downloads on first use to ~/.cache/fastembed.
+# fastembed>=0.3.0
+# sqlite-vec>=0.1.0
