@@ -1,3 +1,35 @@
+## What's new in v2
+
+### 📦 Markdown / Obsidian Export
+Every session is now a folder of linked `.md` files away from being a full Obsidian vault. Two formats:
+
+- **Obsidian zip** — one `.md` per node with YAML frontmatter, plus an `_index.md` showing the tree. Wikilinks are injected automatically at highlight locations, so dropping the unzipped folder into a vault gives you a graph view that mirrors LearningTool's.
+- **Single Markdown** — one document with depth-based heading nesting (root → H2, children → H3, etc.). Good for printing, sharing, or pasting into other tools.
+
+**How to use:** Hover any session in the sidebar → click the ⬇ button → pick a format.
+
+### 🔎 Semantic Search Across Sessions
+Knowledge accumulates instead of being siloed per session.
+
+- Top-bar search input (or **Ctrl/Cmd+K** from anywhere) → results panel grouped by session
+- Click a result → loads that session and pans the canvas to the matching node with a flash effect
+- Powered by `fastembed` (MiniLM, 384-dim) + `sqlite-vec` — runs entirely locally, no cloud
+- First-run reindex happens in a background thread; subsequent saves only re-embed changed nodes (via content hashing)
+- **Optional dependency.** If you don't install it, the rest of the app works unchanged.
+
+---
+
+
+
+
+
+
+
+
+
+
+
+
 # LearningTool
 
 **Build a connected graph of understanding.** Ask a question, get an AI response, highlight text to branch into deeper exploration. Every follow-up becomes a connected node in a visual knowledge graph.
