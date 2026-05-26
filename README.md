@@ -1,10 +1,12 @@
+## Deployment
 
-Deployment: 
+```bash
 git clone https://github.com/Dyslexicdoc/LearningTool-v2.git
 cd LearningTool-v2
 git checkout feat/markdown-export-and-semantic-search
 python3 -m venv .venv
-source .venv/bin/activate       
+source .venv/bin/activate
+
 # Tier 1 — core only. Branching graph + markdown/Obsidian export.
 pip install -r requirements.txt
 
@@ -15,7 +17,7 @@ pip install -r requirements-embeddings.txt
 pip install -r requirements-ingestion.txt
 
 python app.py
-
+```
 
 
 
