@@ -674,7 +674,7 @@ async def summarize_subtree(session_id: str, node_id: str, payload: dict | None 
 
     try:
         result = await provider.submit(prompt)
-        response_text = (result or {}).get("content", "")
+        response_text = (result or {}).get("text", "")
     except Exception as e:
         logger.exception("Summarization failed")
         raise HTTPException(500, f"LLM call failed: {e}")
