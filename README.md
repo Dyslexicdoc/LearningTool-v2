@@ -1,3 +1,122 @@
+## Deployment
+
+```bash
+git clone https://github.com/Dyslexicdoc/LearningTool-v2.git
+cd LearningTool-v2
+git checkout feat/markdown-export-and-semantic-search
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Tier 1 — core only. Branching graph + markdown/Obsidian export.
+pip install -r requirements.txt
+
+# Tier 2 — add semantic search across sessions (optional, ~80 MB)
+pip install -r requirements-embeddings.txt
+
+# Tier 3 — add PDF / URL / YouTube ingestion (optional, ~15 MB)
+pip install -r requirements-ingestion.txt
+
+python app.py
+```
+
+
+## What's New in v3
+
+### 📄 Document Ingestion (PDF / URL / YouTube)
+- **"+ Document"** button in the sidebar opens a tabbed modal
+- Drag-and-drop a PDF anywhere on the page to ingest
+- PDFs up to 25 MB (text-based; no OCR for scanned PDFs yet)
+- URL articles via trafilatura (strips nav/ads/footers)
+- YouTube transcripts with timestamps (requires CC enabled)
+- Each ingest creates a new session with the document as a blue-tinted root node — highlight and branch as usual
+
+### 📋 Branch Summarization
+- Right-click any node → **"📋 Summarize subtree"**
+- LLM generates a coherent summary covering the node and all descendants
+- Creates a purple-tinted summary node; original subtree auto-hidden
+- Right-click the summary → **"👁 Show/hide summarized nodes"** to toggle
+- Hidden state persists across session reloads
+
+### 🔌 MCP (Model Context Protocol) Foundation
+- New **"MCP Servers"** tab in Settings UI
+- Add / update / delete / test MCP servers (HTTP and SSE transports)
+- **Test** button does JSON-RPC `initialize` + `tools/list`, displays tools inline
+- Configs persist to `settings/mcp_servers.json`
+- ⚠ **Foundation only** — wiring MCP tools into the LLM call loop is the next step
+
+### Bundled improvements
+- Node-level right-click menu (distinct from the text-selection menu)
+- "Find related nodes" entry when semantic search is enabled
+- Banner UI for async operations (used by summarize flow)
+- Distinct node styling per type (document = blue, summary = purple)
+- `Canvas.centerOn()` helper for jumping to nodes
+- SessionManager hooks (`on_save` / `on_delete` / `on_purge`)
+- `python-multipart` added to base requirements (needed for file uploads)
+
+### New API endpoints
+```
+POST /api/sessions/ingest/file                              — PDF upload
+POST /api/sessions/ingest/url                               — Article / YouTube URL
+POST /api/nodes/{session_id}/{node_id}/summarize            — Generate summary node
+GET    /api/mcp/servers                                     — List MCP servers
+POST   /api/mcp/servers                                     — Add MCP server
+PUT    /api/mcp/servers/{id}                                — Update MCP server
+DELETE /api/mcp/servers/{id}                                — Remove MCP server
+POST   /api/mcp/servers/{id}/test                           — Test connection + list tools
+```
+
+### New files
+- `ingestion.py` — PDF / URL / YouTube text extraction
+- `mcp_manager.py` — MCP config storage + JSON-RPC test client
+- `requirements-ingestion.txt` — `pypdf`, `trafilatura`, `youtube-transcript-api`
+- `static/js/ingest.js` — ingestion modal + drag-and-drop
+- `static/js/node_menu.js` — node-level right-click menu
+
+### Data model additions
+`NodeData` gained three optional fields (backward compatible):
+- `source_type` — `"pdf" | "url" | "youtube"` for document root nodes
+- `source_meta` — flexible dict (filename, page count, URL, etc.)
+- `summarized_nodes` — list of node IDs covered by a summary node
+
+`prompt_mode` gained two new values: `"document"` and `"summary"`.
+
+
+
+
+
+
+## What's new in v2
+
+### 📦 Markdown / Obsidian Export
+Every session is now a folder of linked `.md` files away from being a full Obsidian vault. Two formats:
+
+- **Obsidian zip** — one `.md` per node with YAML frontmatter, plus an `_index.md` showing the tree. Wikilinks are injected automatically at highlight locations, so dropping the unzipped folder into a vault gives you a graph view that mirrors LearningTool's.
+- **Single Markdown** — one document with depth-based heading nesting (root → H2, children → H3, etc.). Good for printing, sharing, or pasting into other tools.
+
+**How to use:** Hover any session in the sidebar → click the ⬇ button → pick a format.
+
+### 🔎 Semantic Search Across Sessions
+Knowledge accumulates instead of being siloed per session.
+
+- Top-bar search input (or **Ctrl/Cmd+K** from anywhere) → results panel grouped by session
+- Click a result → loads that session and pans the canvas to the matching node with a flash effect
+- Powered by `fastembed` (MiniLM, 384-dim) + `sqlite-vec` — runs entirely locally, no cloud
+- First-run reindex happens in a background thread; subsequent saves only re-embed changed nodes (via content hashing)
+- **Optional dependency.** If you don't install it, the rest of the app works unchanged.
+
+---
+
+
+
+
+
+
+
+
+
+
+
+
 # LearningTool
 
 **Build a connected graph of understanding.** Ask a question, get an AI response, highlight text to branch into deeper exploration. Every follow-up becomes a connected node in a visual knowledge graph.

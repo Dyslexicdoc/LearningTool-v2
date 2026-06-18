@@ -12,7 +12,10 @@
     <aside id="sidebar" class="sidebar">
         <div class="sidebar-header">
             <h1 class="sidebar-title">Learning Tool</h1>
-            <button id="btn-new-session" class="btn btn-primary btn-sm">+ New</button>
+            <div class="sidebar-new-buttons">
+                <button id="btn-new-session" class="btn btn-primary btn-sm">+ New</button>
+                <button id="btn-new-document" class="btn btn-sm btn-secondary" title="Start a session from a PDF, URL, or YouTube video">+ Document</button>
+            </div>
         </div>
         <div id="session-list" class="session-list">
             <!-- Sessions populated by JS -->
@@ -37,6 +40,8 @@
             </div>
             <select id="provider-select" class="provider-select" title="Select AI provider"></select>
             <div class="top-bar-actions">
+                <input type="search" id="global-search" class="global-search"
+                       placeholder="🔎 Search past nodes…" autocomplete="off" title="Semantic search across all sessions">
                 <span id="session-name-display" class="session-name" title="Double-click to rename"></span>
                 <button id="btn-auto-layout" class="btn btn-icon" style="width:auto;padding:0 10px" title="Organize nodes into a tidy tree">Tidy</button>
                 <button id="btn-zoom-in" class="btn btn-icon" title="Zoom in">+</button>
@@ -46,6 +51,15 @@
                 <button id="btn-theme-toggle" class="btn btn-icon" title="Toggle dark/light mode">☀</button>
             </div>
         </div>
+
+        <!-- Search results panel (hidden by default) -->
+        <aside id="search-panel" class="search-panel hidden">
+            <div class="search-panel-header">
+                <span class="search-panel-title">Search results</span>
+                <button id="btn-close-search" class="btn btn-icon btn-sm" title="Close">✕</button>
+            </div>
+            <div id="search-results" class="search-results"></div>
+        </aside>
 
         <!-- Canvas viewport -->
         <div id="canvas-viewport" class="canvas-viewport">
@@ -80,6 +94,9 @@
     <script src="/static/js/context_menu.js"></script>
     <script src="/static/js/session.js"></script>
     <script src="/static/js/settings.js"></script>
+    <script src="/static/js/search.js"></script>
+    <script src="/static/js/ingest.js"></script>
+    <script src="/static/js/node_menu.js"></script>
     <script src="/static/js/app.js"></script>
 </body>
 </html>

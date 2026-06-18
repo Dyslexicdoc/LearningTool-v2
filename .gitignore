@@ -10,3 +10,9 @@ docker-compose.yml
 *.yml.bak
 infrastructure/**/__pycache__/
 CLAUDE.md
+
+# Embeddings — local cache and the runtime DB
+embeddings.db
+embeddings.db-journal
+embed_test.db
+.fastembed_cache/

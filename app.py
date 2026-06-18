@@ -14,9 +14,9 @@ from pathlib import Path
 from datetime import datetime
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse, Response
 
 from models import (
     QueryRequest, QueryResponse, JobStatusResponse,
@@ -27,6 +27,12 @@ from llm_bridge import ProviderRegistry
 from prompt_engineer import build_prompt, build_lineage_context
 from session_manager import SessionManager
 from settings_manager import SettingsManager
+import exporter
+import embedder
+import ingestion
+import logging
+
+logger = logging.getLogger(__name__)
 
 # ---- Paths ----
 BASE_DIR = Path(__file__).parent.resolve()
@@ -51,6 +57,47 @@ settings_mgr = SettingsManager(SETTINGS_DIR, cli_url=_cli_args.llm_url, cli_mode
 provider_registry = ProviderRegistry(settings_mgr)
 session_mgr = SessionManager(SESSIONS_DIR)
 
+# MCP (Model Context Protocol) server configurations. Foundation only:
+# this stores configs and tests connections. Wiring MCP tools into the LLM
+# call loop is a follow-up.
+from mcp_manager import MCPManager
+mcp_mgr = MCPManager(SETTINGS_DIR)
+
+# Optional embeddings service. If fastembed+sqlite-vec aren't installed,
+# search/similar endpoints will 503 but everything else still works.
+embedding_service = None
+if embedder.is_available():
+    try:
+        from embedding_service import EmbeddingService
+        embedding_service = EmbeddingService(
+            sessions_dir=SESSIONS_DIR,
+            db_path=SESSIONS_DIR.parent / "embeddings.db",
+            backend=embedder.make_default_backend(),
+        )
+        # Wire SessionManager hooks. The on_save hook fires from a sync code
+        # path so we schedule the async indexer ourselves via a thread-safe
+        # call into the running event loop.
+        def _on_save(session_id: str, data: dict):
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.run_coroutine_threadsafe(
+                        embedding_service.on_session_save_async(session_id, data), loop
+                    )
+                else:
+                    embedding_service.on_session_save_sync(session_id, data)
+            except RuntimeError:
+                # No event loop (rare); fall back to sync
+                embedding_service.on_session_save_sync(session_id, data)
+        session_mgr.on_save = _on_save
+        session_mgr.on_purge = embedding_service.on_session_purge
+        logger.info("Embeddings enabled.")
+    except Exception:
+        logger.exception("Failed to initialize embedding service; continuing without semantic search.")
+        embedding_service = None
+else:
+    logger.info("Embeddings disabled (install fastembed + sqlite-vec to enable).")
+
 # Track running jobs: job_id -> dict
 jobs: dict[str, dict] = {}
 
@@ -73,6 +120,24 @@ async def lifespan(app: FastAPI):
     purged = session_mgr.cleanup_trash()
     if purged:
         print(f"Trash cleanup: permanently removed {purged} expired session(s)")
+    # One-shot reindex if embeddings are enabled and the DB looks empty.
+    if embedding_service is not None:
+        try:
+            indexed = embedding_service.status()["indexed_node_count"]
+            if indexed == 0:
+                # Run reindex in a background thread so startup isn't blocked
+                # by the first model download.
+                def _bg_reindex():
+                    try:
+                        stats = embedding_service.reindex_all()
+                        logger.info(f"[embeddings] initial reindex: {stats}")
+                    except Exception:
+                        logger.exception("[embeddings] initial reindex failed")
+                asyncio.get_event_loop().run_in_executor(None, _bg_reindex)
+            else:
+                logger.info(f"[embeddings] {indexed} nodes already indexed.")
+        except Exception:
+            logger.exception("[embeddings] startup check failed")
     yield
 
 
@@ -431,6 +496,332 @@ async def rename_session(session_id: str, req: SessionRename):
 async def delete_session(session_id: str):
     session_mgr.delete(session_id)
     return {"status": "deleted"}
+
+
+# ---- API: Export ----
+
+@app.get("/api/sessions/{session_id}/export")
+async def export_session(session_id: str, format: str = "obsidian"):
+    """Download a session as Markdown.
+
+    format=obsidian → zip of linked .md files (Obsidian-flavoured wikilinks)
+    format=single   → one .md document with depth-based heading nesting
+    """
+    data = session_mgr.load(session_id)
+    if not data:
+        raise HTTPException(404, "Session not found")
+
+    name_slug = exporter.slugify(data.get("name", "")) or "session"
+
+    if format == "obsidian":
+        content = exporter.export_obsidian(data)
+        filename = f"{name_slug}.zip"
+        return Response(
+            content=content,
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    if format == "single":
+        content = exporter.export_single_markdown(data)
+        filename = f"{name_slug}.md"
+        return Response(
+            content=content,
+            media_type="text/markdown; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    raise HTTPException(400, f"Unknown format: {format!r}. Use 'obsidian' or 'single'.")
+
+
+# ---- API: Ingestion (PDF / URL / YouTube) ----
+
+def _ingestion_to_session(result: ingestion.IngestionResult) -> dict:
+    """Create a session whose root node IS the ingested document."""
+    info = session_mgr.create(name=result.title[:80] or "Document")
+    sid = info["id"]
+    data = session_mgr.load(sid)
+
+    node_id = f"node_{uuid.uuid4().hex[:12]}"
+    data["nodes"][node_id] = {
+        "id": node_id,
+        "parent_id": None,
+        "highlight_id": None,
+        "x": 80,
+        "y": 80,
+        "width": 520,
+        "height": None,
+        "prompt_text": f"[Imported {result.source_type}: {result.title}]",
+        "prompt_mode": "document",
+        "response_html": "",            # frontend will render from response_text
+        "response_text": result.text,
+        "highlighted_text": None,
+        "status": "complete",
+        "created_at": data["created_at"],
+        "source_type": result.source_type,
+        "source_meta": result.source_meta,
+    }
+    session_mgr.save(sid, data)
+    return {"session_id": sid, "node_id": node_id, "title": result.title,
+            "source_type": result.source_type, "source_meta": result.source_meta}
+
+
+@app.post("/api/sessions/ingest/file")
+async def ingest_file(file: UploadFile = File(...)):
+    """Ingest a PDF upload. Returns the new session's ID and root node."""
+    try:
+        contents = await file.read()
+        if file.filename and file.filename.lower().endswith(".pdf"):
+            result = ingestion.extract_pdf(contents, filename=file.filename)
+        else:
+            raise HTTPException(400, "Only PDF files are supported.")
+    except ingestion.IngestionError as e:
+        raise HTTPException(400, str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Ingestion failed")
+        raise HTTPException(500, f"Ingestion failed: {e}")
+    return _ingestion_to_session(result)
+
+
+@app.post("/api/sessions/ingest/url")
+async def ingest_url(payload: dict):
+    """Ingest a URL (web article) or YouTube video."""
+    url = (payload or {}).get("url", "").strip()
+    if not url:
+        raise HTTPException(400, "Missing 'url' in body.")
+    try:
+        result = ingestion.extract_url(url)
+    except ingestion.IngestionError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        logger.exception("URL ingestion failed")
+        raise HTTPException(500, f"Ingestion failed: {e}")
+    return _ingestion_to_session(result)
+
+
+# ---- API: Summarize subtree ----
+
+def _walk_subtree(nodes: dict, root_id: str) -> list[str]:
+    """Return root_id followed by all descendant IDs in BFS order."""
+    children_of: dict[str, list[str]] = {}
+    for nid, n in nodes.items():
+        pid = n.get("parent_id")
+        if pid:
+            children_of.setdefault(pid, []).append(nid)
+    # Stable order: by created_at
+    for pid, kids in children_of.items():
+        kids.sort(key=lambda cid: nodes[cid].get("created_at", ""))
+
+    out = []
+    stack = [root_id]
+    while stack:
+        nid = stack.pop(0)
+        if nid in out or nid not in nodes:
+            continue
+        out.append(nid)
+        stack.extend(children_of.get(nid, []))
+    return out
+
+
+def _build_summary_prompt(nodes: dict, ids: list[str]) -> str:
+    """Build a prompt asking the LLM to summarize a subtree."""
+    parts = ["You are summarizing a branch of exploratory learning notes."]
+    parts.append("Below is a tree of related questions and AI responses, in order of exploration.")
+    parts.append("Produce a single coherent summary that captures the key concepts, findings, and "
+                 "open questions. Use markdown. Aim for ~400 words. Do NOT introduce new information "
+                 "or speculation — stick to what's in the source notes.")
+    parts.append("")
+    parts.append("---")
+    parts.append("")
+    for nid in ids:
+        n = nodes.get(nid, {})
+        mode = n.get("prompt_mode", "initial")
+        prompt_text = (n.get("prompt_text") or "").strip()
+        response_text = (n.get("response_text") or "").strip()
+        hl = (n.get("highlighted_text") or "").strip()
+        header_bits = [f"[{mode}]"]
+        if hl:
+            header_bits.append(f'highlight="{hl[:80]}"')
+        parts.append(f"### Node {' '.join(header_bits)}")
+        if prompt_text:
+            parts.append(f"**Question:** {prompt_text}")
+        if response_text:
+            parts.append(response_text[:3000])
+        parts.append("")
+    parts.append("---")
+    parts.append("")
+    parts.append("Now write the summary:")
+    return "\n".join(parts)
+
+
+@app.post("/api/nodes/{session_id}/{node_id}/summarize")
+async def summarize_subtree(session_id: str, node_id: str, payload: dict | None = None):
+    """Generate a summary node covering this node and all its descendants."""
+    data = session_mgr.load(session_id)
+    if not data:
+        raise HTTPException(404, "Session not found")
+    nodes = data.get("nodes", {})
+    if node_id not in nodes:
+        raise HTTPException(404, "Node not found")
+
+    subtree_ids = _walk_subtree(nodes, node_id)
+    if len(subtree_ids) < 2:
+        raise HTTPException(400, "Nothing to summarize — node has no descendants.")
+
+    provider_id = (payload or {}).get("provider_id")
+    provider = _get_provider(provider_id)
+    prompt = _build_summary_prompt(nodes, subtree_ids)
+
+    try:
+        result = await provider.submit(prompt)
+        response_text = (result or {}).get("text", "")
+    except Exception as e:
+        logger.exception("Summarization failed")
+        raise HTTPException(500, f"LLM call failed: {e}")
+
+    if not response_text or not response_text.strip():
+        raise HTTPException(500, "LLM returned empty response.")
+
+    # Place the summary node visually offset from the root of the subtree
+    root_node = nodes[node_id]
+    new_id = f"node_{uuid.uuid4().hex[:12]}"
+    summary_node = {
+        "id": new_id,
+        "parent_id": None,           # standalone — not part of the original tree
+        "highlight_id": None,
+        "x": (root_node.get("x", 0) or 0) + 600,
+        "y": root_node.get("y", 0) or 0,
+        "width": 500,
+        "height": None,
+        "prompt_text": f"Summary of {len(subtree_ids)} nodes",
+        "prompt_mode": "summary",
+        "response_html": "",
+        "response_text": response_text,
+        "highlighted_text": None,
+        "status": "complete",
+        "created_at": datetime.now().isoformat(),
+        "summarized_nodes": subtree_ids,
+    }
+    data["nodes"][new_id] = summary_node
+    session_mgr.save(session_id, data)
+    return {"node_id": new_id, "summarized_count": len(subtree_ids), "node": summary_node}
+
+
+# ---- API: Semantic search ----
+
+def _require_embeddings():
+    if embedding_service is None:
+        raise HTTPException(
+            503,
+            "Semantic search is not available. Install fastembed and sqlite-vec, "
+            "then restart: pip install fastembed sqlite-vec",
+        )
+    return embedding_service
+
+
+@app.get("/api/embeddings/status")
+async def embeddings_status():
+    """Whether semantic search is available, and how many nodes are indexed."""
+    if embedding_service is None:
+        return {"available": False, "reason": "fastembed or sqlite-vec not installed"}
+    return {"available": True, **embedding_service.status()}
+
+
+@app.get("/api/search")
+async def semantic_search(q: str, k: int = 10, exclude_session_id: str | None = None):
+    """Semantic search across all indexed nodes.
+
+    Returns ordered results (closest first) with node + session metadata.
+    Each result includes a `snippet` derived from the response text.
+    """
+    svc = _require_embeddings()
+    k = max(1, min(k, 50))
+    try:
+        results = svc.search(q, k=k, exclude_session_id=exclude_session_id)
+    except Exception as e:
+        logger.exception("[embeddings] search failed")
+        raise HTTPException(500, f"Search failed: {e}")
+    # Add a short snippet for the UI
+    for r in results:
+        text = (r.get("response_text") or "").strip()
+        r["snippet"] = (text[:240] + "…") if len(text) > 240 else text
+    return {"query": q, "k": k, "results": results}
+
+
+@app.get("/api/nodes/{node_id}/similar")
+async def similar_nodes(node_id: str, k: int = 5, exclude_session_id: str | None = None):
+    """Find nodes semantically similar to a given node."""
+    svc = _require_embeddings()
+    k = max(1, min(k, 25))
+    results = svc.similar_to(node_id, k=k, exclude_session_id=exclude_session_id)
+    for r in results:
+        text = (r.get("response_text") or "").strip()
+        r["snippet"] = (text[:240] + "…") if len(text) > 240 else text
+    return {"node_id": node_id, "k": k, "results": results}
+
+
+@app.post("/api/embeddings/reindex")
+async def reindex_embeddings():
+    """Re-embed every session on disk. Idempotent thanks to content hashing —
+    only nodes whose (prompt+response+mode) changed will actually re-embed."""
+    svc = _require_embeddings()
+    try:
+        stats = svc.reindex_all()
+    except Exception as e:
+        logger.exception("[embeddings] reindex failed")
+        raise HTTPException(500, f"Reindex failed: {e}")
+    return {"status": "ok", "stats": stats}
+
+
+# ---- API: MCP (Model Context Protocol) server config ----
+
+@app.get("/api/mcp/servers")
+async def list_mcp_servers():
+    """List configured MCP servers (auth headers are returned but the UI
+    should never persist sensitive ones in plaintext on disk in real use)."""
+    return {"servers": mcp_mgr.list_servers()}
+
+
+@app.post("/api/mcp/servers")
+async def add_mcp_server(payload: dict):
+    """Add a new MCP server. Required fields: name, transport, url|command."""
+    try:
+        cfg = mcp_mgr.add(
+            name=payload.get("name", ""),
+            transport=payload.get("transport", "http"),
+            url=payload.get("url", ""),
+            command=payload.get("command", ""),
+            args=payload.get("args", []),
+            headers=payload.get("headers", {}),
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return cfg
+
+
+@app.put("/api/mcp/servers/{server_id}")
+async def update_mcp_server(server_id: str, payload: dict):
+    try:
+        return mcp_mgr.update(server_id, payload)
+    except KeyError:
+        raise HTTPException(404, "Server not found")
+
+
+@app.delete("/api/mcp/servers/{server_id}")
+async def remove_mcp_server(server_id: str):
+    mcp_mgr.remove(server_id)
+    return {"status": "ok"}
+
+
+@app.post("/api/mcp/servers/{server_id}/test")
+async def test_mcp_server(server_id: str):
+    """Try to connect and list tools. Useful for validating config from the UI."""
+    cfg = mcp_mgr.get(server_id)
+    if not cfg:
+        raise HTTPException(404, "Server not found")
+    from mcp_manager import test_connection
+    result = await test_connection(cfg)
+    return result
 
 
 # ---- API: Trash endpoints ----

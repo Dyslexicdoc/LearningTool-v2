@@ -82,12 +82,20 @@ const Session = (() => {
                     <div class="session-item-name">${escapeHTML(s.name)}</div>
                     <div class="session-item-meta">${formatDate(s.updated_at)} · ${s.node_count} nodes</div>
                     <div class="session-item-actions">
+                        <button class="btn btn-sm btn-export" title="Export as Markdown">⬇</button>
                         <button class="btn btn-sm btn-delete" title="Delete">✕</button>
                     </div>
                 `;
                 item.addEventListener('click', (e) => {
                     if (e.target.closest('.btn-delete')) return;
+                    if (e.target.closest('.btn-export')) return;
+                    if (e.target.closest('.export-popover')) return;
                     loadSession(s.id);
+                });
+                const exportBtn = item.querySelector('.btn-export');
+                exportBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    showExportMenu(exportBtn, s);
                 });
                 const delBtn = item.querySelector('.btn-delete');
                 delBtn.addEventListener('click', async (e) => {
@@ -113,6 +121,65 @@ const Session = (() => {
         } catch (err) {
             console.error('Failed to load sessions:', err);
         }
+    }
+
+    /**
+     * Open a small popover menu next to the export button, with format choices.
+     * Clicking a choice triggers a download via a temporary <a> element.
+     */
+    function showExportMenu(anchorBtn, session) {
+        // Close any existing popover first
+        const existing = document.querySelector('.export-popover');
+        if (existing) existing.remove();
+
+        const popover = document.createElement('div');
+        popover.className = 'export-popover';
+        popover.innerHTML = `
+            <button class="export-option" data-format="obsidian">📦 Obsidian (zip)</button>
+            <button class="export-option" data-format="single">📄 Single Markdown</button>
+        `;
+
+        // Position next to the anchor button
+        const rect = anchorBtn.getBoundingClientRect();
+        popover.style.position = 'fixed';
+        popover.style.top = `${rect.bottom + 4}px`;
+        popover.style.left = `${Math.max(8, rect.right - 180)}px`;
+        document.body.appendChild(popover);
+
+        function close() {
+            popover.remove();
+            document.removeEventListener('mousedown', onOutside, true);
+            document.removeEventListener('keydown', onKey);
+        }
+        function onOutside(e) {
+            if (!popover.contains(e.target) && e.target !== anchorBtn) close();
+        }
+        function onKey(e) {
+            if (e.key === 'Escape') close();
+        }
+        document.addEventListener('mousedown', onOutside, true);
+        document.addEventListener('keydown', onKey);
+
+        popover.querySelectorAll('.export-option').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const fmt = btn.dataset.format;
+                triggerDownload(API.exportSessionUrl(session.id, fmt));
+                close();
+            });
+        });
+    }
+
+    /** Trigger a file download for a same-origin URL. */
+    function triggerDownload(url) {
+        const a = document.createElement('a');
+        a.href = url;
+        a.rel = 'noopener';
+        // Hidden + click → browser respects Content-Disposition
+        a.style.display = 'none';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
     }
 
     async function refreshTrash() {
@@ -213,6 +280,12 @@ const Session = (() => {
                 setTimeout(() => EdgeRenderer.redrawAll(), 100);
                 setTimeout(() => EdgeRenderer.redrawAll(), 500);
             });
+
+            // Re-apply any existing summary-node collapses (so reload shows
+            // the summary, not the underlying nodes it covers).
+            if (typeof NodeMenu !== 'undefined' && NodeMenu.applyExistingSummaryCollapses) {
+                setTimeout(() => NodeMenu.applyExistingSummaryCollapses(), 50);
+            }
 
             refreshList();
         } catch (err) {

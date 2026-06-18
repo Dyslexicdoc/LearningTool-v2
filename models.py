@@ -72,6 +72,10 @@ class NodeData(BaseModel):
     highlighted_text: Optional[str] = None
     status: str = "pending"
     created_at: str = ""
+    # v2: ingestion + summarization extensions (all optional, backward compatible)
+    source_type: Optional[str] = None       # "pdf" | "url" | "youtube" for document root nodes
+    source_meta: Optional[dict] = None      # filename / url / page_count / etc.
+    summarized_nodes: Optional[list[str]] = None  # for prompt_mode="summary": IDs of nodes this summarizes
 
 
 class EdgeData(BaseModel):

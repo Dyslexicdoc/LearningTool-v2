@@ -198,9 +198,25 @@ const Canvas = (() => {
         applyTransform();
     }
 
+    /** Pan the viewport so the given world-space DOM element is centered. */
+    function centerOn(el) {
+        if (!el) return;
+        const wx = parseFloat(el.style.left) || 0;
+        const wy = parseFloat(el.style.top) || 0;
+        const w = el.offsetWidth || 0;
+        const h = el.offsetHeight || 0;
+        const vpRect = viewport.getBoundingClientRect();
+        // Center of element in world coords:
+        const cx = wx + w / 2;
+        const cy = wy + h / 2;
+        panX = vpRect.width / 2 - cx * zoom;
+        panY = vpRect.height / 2 - cy * zoom;
+        applyTransform();
+    }
+
     function getWorld() { return world; }
     function getViewport() { return viewport; }
     function getZoom() { return zoom; }
 
-    return { init, screenToWorld, worldToScreen, getState, setState, getWorld, getViewport, getZoom, resetView };
+    return { init, screenToWorld, worldToScreen, getState, setState, getWorld, getViewport, getZoom, resetView, centerOn };
 })();

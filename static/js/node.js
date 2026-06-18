@@ -53,6 +53,7 @@ const NodeRenderer = (() => {
         const el = document.createElement('div');
         el.className = 'lt-node';
         el.id = nodeData.id;
+        if (nodeData.prompt_mode) el.setAttribute('data-mode', nodeData.prompt_mode);
         el.style.left = nodeData.x + 'px';
         el.style.top = nodeData.y + 'px';
 
